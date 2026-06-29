@@ -659,6 +659,19 @@ html,body{height:100%;background:#B2DFD0;font-family:var(--font);-webkit-font-sm
         <div class="profile-row-left"><div class="profile-row-icon green"><i class="ti ti-share"></i></div>Ekspor Ringkasan</div>
         <i class="ti ti-chevron-right"></i>
       </div>
+      <div class="profile-row" onclick="downloadBackupData()">
+        <div class="profile-row-left"><div class="profile-row-icon teal"><i class="ti ti-database-export"></i></div>Backup Data JSON</div>
+        <i class="ti ti-download"></i>
+      </div>
+      <div class="profile-row" onclick="exportTransaksiCSV()">
+        <div class="profile-row-left"><div class="profile-row-icon yellow"><i class="ti ti-file-spreadsheet"></i></div>Export Transaksi CSV</div>
+        <i class="ti ti-download"></i>
+      </div>
+      <div class="profile-row" onclick="triggerImportBackup()">
+        <div class="profile-row-left"><div class="profile-row-icon purple"><i class="ti ti-database-import"></i></div>Restore Backup</div>
+        <i class="ti ti-upload"></i>
+      </div>
+      <input type="file" id="backup-file-input" accept="application/json,.json" style="display:none" onchange="handleBackupImport(event)">
       <div class="profile-row" onclick="goPage('pg-auth')">
         <div class="profile-row-left"><div class="profile-row-icon teal"><i class="ti ti-switch"></i></div>Ganti Akun</div>
         <i class="ti ti-chevron-right"></i>
@@ -1739,6 +1752,144 @@ function exportRingkasan(){
     navigator.clipboard.writeText(text).then(()=>showToast('Ringkasan disalin ✅'));
   } else {
     openModal(`<div class="modal-title">Ekspor Ringkasan</div><textarea style="width:100%;min-height:140px;border:2px solid #E5EFE9;border-radius:12px;padding:10px;font-family:var(--font);font-size:12px;font-weight:600" readonly>${text}</textarea><button class="cta-outline" onclick="closeModal()">Tutup</button>`);
+  }
+}
+
+
+function safeFileDate(){
+  return new Date().toISOString().slice(0,19).replace(/[T:]/g,'-');
+}
+
+function downloadTextFile(filename, content, mime='text/plain;charset=utf-8'){
+  const blob = new Blob([content], {type:mime});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 500);
+}
+
+function buildBackupPayload(){
+  return {
+    app: 'UangJajan',
+    schemaVersion: 1,
+    storageKey: STORAGE_KEY,
+    exportedAt: new Date().toISOString(),
+    data: {
+      users: DB.users || [],
+      transaksi: DB.transaksi || []
+    }
+  };
+}
+
+function downloadBackupData(){
+  const payload = buildBackupPayload();
+  const filename = `uangjajan-backup-${safeFileDate()}.json`;
+  downloadTextFile(filename, JSON.stringify(payload, null, 2), 'application/json;charset=utf-8');
+  showToast('Backup JSON diunduh ✅');
+}
+
+function csvCell(v){
+  const value = v === undefined || v === null ? '' : String(v);
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function exportTransaksiCSV(){
+  const usersById = Object.fromEntries((DB.users || []).map(u=>[u.id,u]));
+  const rows = [
+    ['id','tanggal','user','role','tipe','nominal','kategori','keterangan','papaBayar','papaBayarAt']
+  ];
+  (DB.transaksi || [])
+    .slice()
+    .sort((a,b)=>new Date(a.waktu)-new Date(b.waktu))
+    .forEach(t=>{
+      const user = usersById[t.userId] || {};
+      const cat = getCategory(t.tipe, t.kategori);
+      rows.push([
+        t.id,
+        t.waktu,
+        user.nama || t.userId || '',
+        user.role || '',
+        t.tipe,
+        t.nominal,
+        cat.label,
+        t.keterangan || '',
+        t.papaBayar ? 'lunas' : (t.tipe === 'keluar' ? 'belum' : ''),
+        t.papaBayarAt || ''
+      ]);
+    });
+  const csv = rows.map(row=>row.map(csvCell).join(',')).join('\n');
+  downloadTextFile(`uangjajan-transaksi-${safeFileDate()}.csv`, csv, 'text/csv;charset=utf-8');
+  showToast('CSV transaksi diunduh ✅');
+}
+
+function triggerImportBackup(){
+  const input = document.getElementById('backup-file-input');
+  if(!input){ showToast('Input backup tidak ditemukan'); return; }
+  input.value = '';
+  input.click();
+}
+
+function handleBackupImport(event){
+  const file = event.target.files && event.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try{
+      const payload = JSON.parse(reader.result);
+      restoreBackupPayload(payload);
+    }catch(e){
+      showToast('File backup tidak valid');
+    }
+  };
+  reader.readAsText(file);
+}
+
+function restoreBackupPayload(payload){
+  const data = payload && payload.data ? payload.data : payload;
+  if(!data || !Array.isArray(data.users) || !Array.isArray(data.transaksi)){
+    showToast('Format backup tidak dikenali');
+    return;
+  }
+  window.pendingRestoreData = JSON.stringify({
+    users: data.users,
+    transaksi: data.transaksi
+  });
+  const totalUsers = data.users.length;
+  const totalTrx = data.transaksi.length;
+  openModal(`
+    <div style="text-align:center;padding:8px 0 16px">
+      <div style="font-size:36px;margin-bottom:8px">📦</div>
+      <div class="modal-title" style="text-align:center">Restore Backup?</div>
+      <div style="font-size:13px;font-weight:600;color:#9BA3AE;margin-bottom:18px">
+        Data saat ini akan diganti dengan backup berisi <b>${totalUsers}</b> profil dan <b>${totalTrx}</b> transaksi.
+      </div>
+      <button class="cta-main" onclick="confirmRestoreBackup()">Ya, Restore Data</button>
+      <button class="cta-outline" onclick="closeModal()">Batal</button>
+    </div>`);
+}
+
+function confirmRestoreBackup(){
+  try{
+    const data = JSON.parse(window.pendingRestoreData || '{}');
+    if(!Array.isArray(data.users) || !Array.isArray(data.transaksi)) throw new Error('invalid backup');
+    DB = {
+      users: data.users,
+      transaksi: data.transaksi
+    };
+    saveDB();
+    currentUserId = null;
+    currentUser = null;
+    pageStack = [];
+    window.pendingRestoreData = null;
+    closeModal();
+    showToast('Backup berhasil direstore ✅');
+    goPage('pg-auth');
+  }catch(e){
+    showToast('Restore gagal');
   }
 }
 
